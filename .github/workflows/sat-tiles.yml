@@ -1,21 +1,43 @@
 name: sat-tiles
 on:
   workflow_dispatch:
+    inputs:
+      all:
+        description: "also refresh secondary layers"
+        default: "true"
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "*/10 * * * *"
 concurrency: {group: sat-tiles, cancel-in-progress: false}
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 jobs:
-  ingest:
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          # key layers (Sandwich IR+VIS inputs) every run (~10 min); secondary layers once per 30 min slot.
+          # max zoom follows native resolution: FCI HRFI VIS 0.5 km / IR 1 km -> z8; SEVIRI 3 km -> z6; Dust RGB (resolution not stated by service) -> z7.
+          M=$(date -u +%M); S=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ $((10#$M % 30)) -lt 10 ]; then S=true; fi
+          python3 - <<PY >> $GITHUB_OUTPUT
+          import json
+          L=[{"layer":"mtg_fd:vis06_hrfi","maxz":8},{"layer":"mtg_fd:ir105_hrfi","maxz":8}]
+          if "$S"=="true": L+=[{"layer":"mtg_fd:rgb_dust","maxz":7},{"layer":"msg_iodc:wv062","maxz":6},{"layer":"msg_iodc:rgb_convection","maxz":6}]
+          print("matrix="+json.dumps({"include":L}))
+          PY
+  ingest:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
-      matrix:
-        layer: ["mtg_fd:vis06_hrfi","mtg_fd:ir105_hrfi","mtg_fd:rgb_dust","msg_iodc:wv062","msg_iodc:rgb_convection"]
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,16 +45,16 @@ jobs:
       - run: pip install requests pillow
       - env:
           SAT_LAYERS: ${{ matrix.layer }}
+          SAT_MAXZ: ${{ matrix.maxz }}
           SAT_OUT: out
           SAT_CONC: "4"
         run: python tools/sat_ingest.py
       - run: echo "name=$(echo '${{ matrix.layer }}' | tr ':' '_')" >> $GITHUB_ENV
-      - uses: actions/upload-artifact@v4
+      - uses: actions/cache/save@v4
+        if: ${{ always() }}
         with:
-          name: tiles-${{ env.name }}
           path: out/${{ env.name }}
-          retention-days: 1
-          if-no-files-found: ignore
+          key: tiles-${{ env.name }}-${{ github.run_id }}
   publish:
     needs: ingest
     if: ${{ always() }}
@@ -43,14 +65,21 @@ jobs:
       url: ${{ steps.dep.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: {path: _site_in}
+      - uses: actions/cache/restore@v4
+        with: {path: _site/mtg_fd_vis06_hrfi, key: "tiles-mtg_fd_vis06_hrfi-${{ github.run_id }}", restore-keys: "tiles-mtg_fd_vis06_hrfi-"}
+      - uses: actions/cache/restore@v4
+        with: {path: _site/mtg_fd_ir105_hrfi, key: "tiles-mtg_fd_ir105_hrfi-${{ github.run_id }}", restore-keys: "tiles-mtg_fd_ir105_hrfi-"}
+      - uses: actions/cache/restore@v4
+        with: {path: _site/mtg_fd_rgb_dust, key: "tiles-mtg_fd_rgb_dust-${{ github.run_id }}", restore-keys: "tiles-mtg_fd_rgb_dust-"}
+      - uses: actions/cache/restore@v4
+        with: {path: _site/msg_iodc_wv062, key: "tiles-msg_iodc_wv062-${{ github.run_id }}", restore-keys: "tiles-msg_iodc_wv062-"}
+      - uses: actions/cache/restore@v4
+        with: {path: _site/msg_iodc_rgb_convection, key: "tiles-msg_iodc_rgb_convection-${{ github.run_id }}", restore-keys: "tiles-msg_iodc_rgb_convection-"}
       - run: |
           mkdir -p _site
-          for d in _site_in/tiles-*; do n=${d#_site_in/tiles-}; mkdir -p _site/$n; cp -r $d/. _site/$n/; done
           python tools/sat_manifest.py _site
           echo "MetStat satellite tiles (EUMETSAT EUMETView)." > _site/index.html
-          du -sh _site
+          du -sh _site; ls _site
       - uses: actions/upload-pages-artifact@v3
         with: {path: _site}
       - id: dep

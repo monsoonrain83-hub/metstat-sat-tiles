@@ -12,10 +12,11 @@ def tiley(lat,z):
 def merc(z,x,y):
     n=2**z; s=40075016.68557849; a=-20037508.34278925
     return [a+x*s/n, a+(n-1-y)*s/n, a+(x+1)*s/n, a+(n-y)*s/n]
+MAXZ=int(os.environ.get("SAT_MAXZ","8"))
 def tiles():
     S=set()
     for _,(la0,la1,lo0,lo1,mz) in REG.items():
-        for z in range(3,mz+1):
+        for z in range(3,min(mz,MAXZ)+1):
             for x in range(tilex(lo0,z),tilex(lo1,z)+1):
                 for y in range(tiley(la1,z),tiley(la0,z)+1): S.add((z,x,y))
     return sorted(S)
