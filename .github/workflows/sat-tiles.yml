@@ -80,6 +80,7 @@ jobs:
           python tools/sat_manifest.py _site
           echo "MetStat satellite tiles (EUMETSAT EUMETView)." > _site/index.html
           du -sh _site; ls _site
+          python3 -c "import json;M=json.load(open('_site/manifest.json'));print('::notice title=sat-summary::'+' | '.join(f\"{k}: obs {v['observation_time_utc'][11:16]}Z ok {v['tiles_ok']} fail {v['tiles_failed']} age {v['age_min']}m {v['seconds']}s\" for k,v in M['layers'].items()))"
       - uses: actions/upload-pages-artifact@v3
         with: {path: _site}
       - id: dep
