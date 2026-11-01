@@ -3,7 +3,7 @@ Observation time comes from the WMS time dimension (not from the download time).
 import json, os, sys, time, math, io, re, datetime as dt, concurrent.futures as cf
 import requests, xml.etree.ElementTree as ET
 from PIL import Image
-W="https://view.eumetsat.int/geoserver/ows"; OUT=os.environ.get("SAT_OUT","sat_tiles"); CONC=8
+W="https://view.eumetsat.int/geoserver/ows"; OUT=os.environ.get("SAT_OUT","sat_tiles"); CONC=int(os.environ.get("SAT_CONC","4"))
 LAYERS=os.environ.get("SAT_LAYERS","mtg_fd:vis06_hrfi,mtg_fd:ir105_hrfi,mtg_fd:rgb_dust,msg_iodc:wv062,msg_iodc:rgb_convection").split(",")
 REG={"iran":(24,40,43,64,8),"mideast":(10,45,20,75,6)}  # lat0,lat1,lon0,lon1,maxzoom
 def tilex(lon,z): return int((lon+180)/360*2**z)
@@ -45,10 +45,17 @@ def main():
             r=sget({"service":"WMS","version":"1.3.0","request":"GetMap","layers":L,"styles":"","format":"image/png","crs":"EPSG:3857","bbox":",".join(map(str,merc(z,x,y))),"width":512,"height":512,"transparent":"false","time":T[L]})
             if r is None: return (t,None)
             im=Image.open(io.BytesIO(r.content)).convert("RGB"); b=io.BytesIO(); im.save(b,"WEBP",quality=90,method=4); return (t,b.getvalue())
-        with cf.ThreadPoolExecutor(CONC) as ex:
-            for (z,x,y),data in ex.map(one,allt):
-                if data is None: bad+=1; continue
-                p=f"{d}/{z}/{x}"; os.makedirs(p,exist_ok=True); open(f"{p}/{y}.webp","wb").write(data); ok+=1; size+=len(data)
+        pend=list(allt)
+        for rnd in range(4):   # first pass + up to 3 retry passes for failed tiles (lower concurrency)
+            failed=[]
+            with cf.ThreadPoolExecutor(CONC if rnd==0 else 2) as ex:
+                for (z,x,y),data in ex.map(one,pend):
+                    if data is None: failed.append((z,x,y)); continue
+                    p=f"{d}/{z}/{x}"; os.makedirs(p,exist_ok=True); open(f"{p}/{y}.webp","wb").write(data); ok+=1; size+=len(data)
+            pend=failed
+            if not pend: break
+            time.sleep(5)
+        bad=len(pend)
         meta={"layer":L,"observation_time_utc":T[L],"fetched_utc":dt.datetime.utcnow().isoformat()+"Z","tiles_ok":ok,"tiles_failed":bad,"bytes":size,"seconds":round(time.time()-t0,1),"source":"EUMETSAT EUMETView WMS"}
         json.dump(meta,open(f"{d}/meta.json","w")); report["layers"][L]=meta
     json.dump(report,open(f"{OUT}/ingest_report.json","w"),indent=1); print(json.dumps(report)[:1500])
